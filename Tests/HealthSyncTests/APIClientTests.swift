@@ -1094,3 +1094,50 @@ final class UploadTransportRecoveryTests: XCTestCase {
         XCTAssertTrue(predicate.evaluate(with: sample))
     }
 }
+
+
+final class RawHistoryBackfillTests: XCTestCase {
+    func testDailyAggregationRemainsDefaultAndRawDisablesIt() {
+        let manager = HealthKitManager()
+        XCTAssertEqual(manager.backfillAggregationStrategy(for: .oxygenSaturation), .dailyAverage)
+        XCTAssertEqual(manager.backfillAggregationStrategy(for: .hrvSDNN), .dailyAverage)
+        XCTAssertEqual(manager.backfillAggregationStrategy(for: .stepCount), .dailySum)
+        for type in HealthDataType.allCases {
+            XCTAssertNil(manager.backfillAggregationStrategy(for: type, mode: .rawSamples))
+        }
+    }
+
+    func testRawBloodOxygenAndHRVKeepIndividualSamplesAcrossChunkEnd() async throws {
+        guard HKHealthStore.isHealthDataAvailable() else { throw XCTSkip("HealthKit unavailable") }
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let end = start.addingTimeInterval(60)
+        for (type, identifier, unit, values) in [
+            (HealthDataType.oxygenSaturation, HKQuantityTypeIdentifier.oxygenSaturation, HKUnit.percent(), [0.96, 0.98]),
+            (.hrvSDNN, .heartRateVariabilitySDNN, HKUnit.secondUnit(with: .milli), [25.0, 45.0])
+        ] {
+            let samples = values.enumerated().map { index, value in
+                HKQuantitySample(type: HKQuantityType(identifier), quantity: HKQuantity(unit: unit, doubleValue: value),
+                                 start: start.addingTimeInterval(Double(index) * 50),
+                                 end: start.addingTimeInterval(Double(index) * 50 + 20),
+                                 metadata: ["fixture": "raw-history"])
+            }
+            let manager = HealthKitManager(sampleReader: { requestedType, predicate in
+                XCTAssertEqual(requestedType, HKQuantityType(identifier))
+                XCTAssertEqual(predicate, HKQuery.predicateForSamples(withStart: start, end: end, options: [.strictStartDate]))
+                return samples
+            })
+            let result = try await manager.fetchBackfillSamples(types: [type], start: start, end: end, mode: .rawSamples)
+            XCTAssertEqual(result.quantitySamples.count, 2)
+            for (actual, expected) in zip(result.quantitySamples, samples) {
+                XCTAssertEqual(actual.uuid, expected.uuid)
+                XCTAssertEqual(actual.startAt, expected.startDate)
+                XCTAssertEqual(actual.endAt, expected.endDate)
+                XCTAssertEqual(actual.sourceName, expected.sourceRevision.source.name)
+                XCTAssertEqual(actual.sourceBundleIdentifier, expected.sourceRevision.source.bundleIdentifier)
+                XCTAssertEqual(actual.metadata["fixture"], "raw-history")
+                XCTAssertNil(actual.metadata["aggregation"])
+                XCTAssertEqual(actual.value, expected.quantity.doubleValue(for: unit))
+            }
+        }
+    }
+}

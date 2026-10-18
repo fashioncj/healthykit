@@ -20,7 +20,7 @@ struct HealthKitIncrementalResult: Equatable {
     let deletions: [HealthRecordDeletion]
 }
 
-private enum BackfillQuantityAggregationStrategy: String {
+enum BackfillQuantityAggregationStrategy: String {
     case dailySum = "daily_sum"
     case dailyAverage = "daily_average"
 
@@ -161,7 +161,7 @@ final class HealthKitManager: HealthKitSyncReading {
         return result
     }
 
-    func fetchBackfillSamples(types: Set<HealthDataType>, start: Date, end: Date) async throws -> HealthKitFetchResult {
+    func fetchBackfillSamples(types: Set<HealthDataType>, start: Date, end: Date, mode: BackfillDataMode = .dailySummary) async throws -> HealthKitFetchResult {
         guard isHealthDataAvailable else {
             throw HealthKitManagerError.healthDataUnavailable
         }
@@ -177,7 +177,7 @@ final class HealthKitManager: HealthKitSyncReading {
                 default:
                     if type.kind == .category {
                         result.categorySamples += try await categorySamples(for: type, start: start, end: end)
-                    } else if let strategy = backfillAggregationStrategy(for: type) {
+                    } else if let strategy = backfillAggregationStrategy(for: type, mode: mode) {
                         result.quantitySamples += try await aggregatedQuantitySamples(
                             for: type,
                             start: start,
@@ -185,7 +185,12 @@ final class HealthKitManager: HealthKitSyncReading {
                             strategy: strategy
                         )
                     } else {
-                        result.quantitySamples += try await quantitySamples(for: type, start: start, end: end)
+                        // Assign raw samples by start time so a sample spanning a chunk
+                        // boundary is not dropped by strictEndDate. UUIDs deduplicate retries.
+                        result.quantitySamples += try await quantitySamples(
+                            for: type, start: start, end: end,
+                            options: mode == .rawSamples ? [.strictStartDate] : [.strictStartDate, .strictEndDate]
+                        )
                     }
                 }
             } catch {
@@ -293,14 +298,14 @@ final class HealthKitManager: HealthKitSyncReading {
         observerSampleTypes.removeAll()
     }
 
-    private func quantitySamples(for type: HealthDataType, start: Date, end: Date) async throws -> [HealthQuantitySampleDTO] {
+    private func quantitySamples(for type: HealthDataType, start: Date, end: Date, options: HKQueryOptions = [.strictStartDate, .strictEndDate]) async throws -> [HealthQuantitySampleDTO] {
         guard
             let quantityType = HealthKitTypeRegistry.sampleType(for: type) as? HKQuantityType,
             let unit = HealthKitTypeRegistry.preferredQuantityUnit(for: type)
         else {
             throw HealthKitManagerError.unsupportedType(type)
         }
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [.strictStartDate, .strictEndDate])
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: options)
         let samples = try await samples(sampleType: quantityType, predicate: predicate)
         return samples.compactMap { sample in
             guard let quantitySample = sample as? HKQuantitySample else { return nil }
@@ -612,8 +617,8 @@ final class HealthKitManager: HealthKitSyncReading {
         } ?? [:]
     }
 
-    private func backfillAggregationStrategy(for type: HealthDataType) -> BackfillQuantityAggregationStrategy? {
-        guard type.kind == .quantity else { return nil }
+    func backfillAggregationStrategy(for type: HealthDataType, mode: BackfillDataMode = .dailySummary) -> BackfillQuantityAggregationStrategy? {
+        guard mode == .dailySummary, type.kind == .quantity else { return nil }
         switch type {
         case .activeEnergy, .appleExerciseTime, .appleMoveTime, .appleStandTime, .basalEnergy,
              .distanceCrossCountrySkiing, .distanceCycling, .distanceDownhillSnowSports, .distancePaddleSports,

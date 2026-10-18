@@ -115,16 +115,15 @@ enum BackfillSyncError: LocalizedError, Equatable {
 }
 
 enum BackfillSync {
-    private static let chunkLength: TimeInterval = 30 * 24 * 60 * 60
     private static let maxRecordsPerUpload = 100
 
-    static func chunks(start: Date, end: Date) -> [SyncDateRange] {
+    static func chunks(start: Date, end: Date, mode: BackfillDataMode = .dailySummary) -> [SyncDateRange] {
         guard end > start else { return [] }
 
         var ranges: [SyncDateRange] = []
         var cursor = start
         while cursor < end {
-            let next = min(cursor.addingTimeInterval(chunkLength), end)
+            let next = min(cursor.addingTimeInterval(mode.chunkLength), end)
             ranges.append(SyncDateRange(start: cursor, end: next))
             cursor = next
         }
@@ -388,13 +387,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func backfill(start: Date, end: Date) async {
+    func backfill(start: Date, end: Date, mode: BackfillDataMode = .dailySummary) async {
         guard end > start else { return }
         backfillProgress = 0
         backfillError = nil
         await runBusy {
             try await prepareHostedStorageIfNeeded()
-            let chunks = BackfillSync.chunks(start: start, end: end)
+            let chunks = BackfillSync.chunks(start: start, end: end, mode: mode)
             let total = Double(chunks.count)
             for (index, chunk) in chunks.enumerated() {
                 do {
@@ -402,7 +401,8 @@ final class AppState: ObservableObject {
                         start: chunk.start,
                         end: chunk.end,
                         refreshAfterUpload: false,
-                        optimizedBackfill: true
+                        optimizedBackfill: true,
+                        backfillMode: mode
                     )
                 } catch {
                     backfillError = userMessage(from: error)
@@ -463,13 +463,14 @@ final class AppState: ObservableObject {
         start: Date,
         end: Date,
         refreshAfterUpload: Bool = true,
-        optimizedBackfill: Bool = false
+        optimizedBackfill: Bool = false,
+        backfillMode: BackfillDataMode = .dailySummary
     ) async throws -> Bool {
         guard let store, let syncEngine else { throw APIClientError.invalidResponse }
         try await ensureHealthPermissionsRequested()
         let configuration = try await uploadConfiguration()
         let fetchResult = try await (optimizedBackfill
-            ? healthKit.fetchBackfillSamples(types: settings.selectedTypes, start: start, end: end)
+            ? healthKit.fetchBackfillSamples(types: settings.selectedTypes, start: start, end: end, mode: backfillMode)
             : healthKit.fetchSamples(types: settings.selectedTypes, start: start, end: end))
         let payload = try normalizer.payload(
             deviceID: try await store.deviceID(),

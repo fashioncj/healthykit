@@ -303,6 +303,17 @@ private actor NegativeAcknowledgementUploader: SyncUploading {
 }
 
 final class BackfillSyncTests: XCTestCase {
+    func testRawBackfillUsesContiguousDaySizedChunks() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let end = start.addingTimeInterval(2.5 * 24 * 60 * 60)
+        let chunks = BackfillSync.chunks(start: start, end: end, mode: .rawSamples)
+        XCTAssertEqual(chunks.count, 3)
+        XCTAssertEqual(chunks.first?.start, start)
+        XCTAssertEqual(chunks.last?.end, end)
+        for chunk in chunks { XCTAssertLessThanOrEqual(chunk.end.timeIntervalSince(chunk.start), 86400) }
+        for pair in zip(chunks, chunks.dropFirst()) { XCTAssertEqual(pair.0.end, pair.1.start) }
+    }
+
     func testLargeBackfillPayloadSplitsIntoServerSizedUploads() {
         let start = Date(timeIntervalSince1970: 0)
         let end = Date(timeIntervalSince1970: 60)
