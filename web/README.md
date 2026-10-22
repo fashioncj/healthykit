@@ -42,7 +42,8 @@ npm run deploy
 
 `wrangler.jsonc` records the Pages project configuration. `public/_headers` supplies
 security headers, allows the Cloudflare analytics beacon, and advertises `llms.txt`.
-`public/_redirects` sends `www` and the production Pages hostname to the apex domain.
+`functions/_middleware.js` sends `www` and the production Pages hostname to the apex
+domain while preserving the path and query string.
 The Pages Function in `functions/api/health.js` serves the live health check; the
 Next.js route provides the same response shape during local development.
 
