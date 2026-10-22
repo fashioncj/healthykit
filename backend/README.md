@@ -2,7 +2,7 @@
 
 This backend stores HealthSync uploads in Postgres and exposes read APIs for synced metrics, workouts, and sync batches.
 
-For the public walkthroughs, see [server setup](https://healthysync.megabyte.sh/docs/self-hosting), [operations](https://healthysync.megabyte.sh/docs/operations), and [agent access](https://healthysync.megabyte.sh/docs/agent-access).
+For the public walkthroughs, see [server setup](https://healthysync.app/docs/self-hosting), [operations](https://healthysync.app/docs/operations), and [agent access](https://healthysync.app/docs/agent-access).
 
 The iOS app already sends the correct request shape:
 
