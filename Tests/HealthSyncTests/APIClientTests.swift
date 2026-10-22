@@ -1261,6 +1261,11 @@ final class RawHistoryBackfillTests: XCTestCase {
                                         start: start.addingTimeInterval(30), end: boundary.addingTimeInterval(30))
         var reads = 0
         let manager = HealthKitManager(sampleReader: { type, predicate in
+            if #available(iOS 18.0, *),
+               type == HKQuantityType(.workoutEffortScore) || type == HKQuantityType(.estimatedWorkoutEffortScore) {
+                XCTAssertEqual(predicate, HKQuery.predicateForWorkoutEffortSamplesRelated(workout: workout, activity: nil))
+                return []
+            }
             reads += 1
             XCTAssertEqual(predicate, HKQuery.predicateForSamples(withStart: start, end: boundary, options: [.strictStartDate]))
             if type == HKObjectType.workoutType() { return [workout] }
