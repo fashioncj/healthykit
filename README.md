@@ -4,15 +4,15 @@ HealthSync is a native SwiftUI iOS app that reads selected Apple Health data on-
 
 There is no iCloud or server-side Apple Health REST API. Apple Health reads happen only on the iPhone after the user grants HealthKit read permissions. Health data stays on-device until the user accepts the default private hosted destination or configures a backend URL and auth token.
 
-Website: https://healthysync.megabyte.sh
+Website: https://healthysync.app
 
-User documentation: https://healthysync.megabyte.sh/docs
+User documentation: https://healthysync.app/docs
 
-Apple Health app sync guide: https://healthysync.megabyte.sh/apple-health-app-sync
+Apple Health app sync guide: https://healthysync.app/apple-health-app-sync
 
-Privacy policy: https://healthysync.megabyte.sh/privacy
+Privacy policy: https://healthysync.app/privacy
 
-Support: https://healthysync.megabyte.sh/support
+Support: https://healthysync.app/support
 
 ## What It Syncs
 

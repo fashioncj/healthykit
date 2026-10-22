@@ -1,0 +1,2 @@
+https://www.healthysync.app/* https://healthysync.app/:splat 301
+https://healthysync.pages.dev/* https://healthysync.app/:splat 301
