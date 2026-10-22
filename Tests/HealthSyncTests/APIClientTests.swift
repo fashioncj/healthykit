@@ -374,7 +374,10 @@ final class APIClientTests: XCTestCase {
             return type == effort.sampleType ? [effort] : []
         })
         let recent = try await manager.fetchSamples(types: [.workouts], start: start, end: end)
-        let backfill = try await manager.fetchBackfillSamples(types: [.workouts], start: start, end: end)
+        var backfill = HealthKitFetchResult.empty
+        try await manager.forEachBackfillBatch(types: [.workouts], start: start, end: end, mode: .dailySummary) {
+            backfill.workoutSamples += $0.workoutSamples
+        }
         for result in [recent, backfill] {
             XCTAssertEqual(result.workoutSamples.count, 1)
             XCTAssertEqual(result.workoutSamples.first?.metadata["workout_effort_score"].flatMap(Double.init), 7)
@@ -1097,14 +1100,22 @@ final class UploadTransportRecoveryTests: XCTestCase {
 
 
 final class RawHistoryBackfillTests: XCTestCase {
-    func testDailyAggregationRemainsDefaultAndRawDisablesIt() {
+    func testOnlyBloodOxygenAndHRVBypassDailyStatistics() {
         let manager = HealthKitManager()
-        XCTAssertEqual(manager.backfillAggregationStrategy(for: .oxygenSaturation), .dailyAverage)
-        XCTAssertEqual(manager.backfillAggregationStrategy(for: .hrvSDNN), .dailyAverage)
-        XCTAssertEqual(manager.backfillAggregationStrategy(for: .stepCount), .dailySum)
         for type in HealthDataType.allCases {
-            XCTAssertNil(manager.backfillAggregationStrategy(for: type, mode: .rawSamples))
+            let summary = manager.backfillAggregationStrategy(for: type, mode: .dailySummary)
+            let raw = manager.backfillAggregationStrategy(for: type, mode: .rawSamples)
+            if type == .oxygenSaturation || type == .hrvSDNN {
+                XCTAssertEqual(summary, .dailyAverage)
+                XCTAssertNil(raw)
+            } else {
+                XCTAssertEqual(raw, summary, "Do not change device-overlap handling for \(type)")
+            }
         }
+        for type in [HealthDataType.stepCount, .activeEnergy, .distanceWalkingRunning] {
+            XCTAssertEqual(manager.backfillAggregationStrategy(for: type, mode: .rawSamples), .dailySum)
+        }
+        XCTAssertEqual(manager.backfillAggregationStrategy(for: .heartRate, mode: .rawSamples), .dailyAverage)
     }
 
     func testRawBloodOxygenAndHRVKeepIndividualSamplesAcrossChunkEnd() async throws {
@@ -1121,14 +1132,22 @@ final class RawHistoryBackfillTests: XCTestCase {
                                  end: start.addingTimeInterval(Double(index) * 50 + 20),
                                  metadata: ["fixture": "raw-history"])
             }
-            let manager = HealthKitManager(sampleReader: { requestedType, predicate in
+            var readCount = 0
+            let manager = HealthKitManager(backfillPageReader: { requestedType, predicate, anchor, limit in
+                readCount += 1
                 XCTAssertEqual(requestedType, HKQuantityType(identifier))
                 XCTAssertEqual(predicate, HKQuery.predicateForSamples(withStart: start, end: end, options: [.strictStartDate]))
-                return samples
+                XCTAssertNil(anchor)
+                XCTAssertEqual(limit, 100)
+                return .init(samples: samples, deletedCount: 0, anchor: HKQueryAnchor(fromValue: 1))
             })
-            let result = try await manager.fetchBackfillSamples(types: [type], start: start, end: end, mode: .rawSamples)
-            XCTAssertEqual(result.quantitySamples.count, 2)
-            for (actual, expected) in zip(result.quantitySamples, samples) {
+            var records: [HealthQuantitySampleDTO] = []
+            try await manager.forEachBackfillBatch(types: [type], start: start, end: end, mode: .rawSamples) {
+                records += $0.quantitySamples
+            }
+            XCTAssertEqual(readCount, 1)
+            XCTAssertEqual(records.count, 2)
+            for (actual, expected) in zip(records, samples) {
                 XCTAssertEqual(actual.uuid, expected.uuid)
                 XCTAssertEqual(actual.startAt, expected.startDate)
                 XCTAssertEqual(actual.endAt, expected.endDate)
@@ -1138,6 +1157,133 @@ final class RawHistoryBackfillTests: XCTestCase {
                 XCTAssertNil(actual.metadata["aggregation"])
                 XCTAssertEqual(actual.value, expected.quantity.doubleValue(for: unit))
             }
+        }
+    }
+
+    func testRawPagesAreConsumedBeforeNextReadIncludingDeletionOnlyPages() async throws {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        var reads = 0
+        var consumed = 0
+        var retainedIDs = Set<UUID>()
+        let manager = HealthKitManager(backfillPageReader: { _, _, anchor, limit in
+            XCTAssertEqual(limit, 100)
+            reads += 1
+            if reads == 1 {
+                XCTAssertNil(anchor)
+                return .init(samples: [], deletedCount: 100, anchor: HKQueryAnchor(fromValue: 1))
+            }
+            XCTAssertEqual(consumed, reads - 2, "Read must await previous page's consumer")
+            XCTAssertEqual(anchor, HKQueryAnchor(fromValue: reads - 1))
+            let count = reads == 2 ? 100 : 3
+            let samples = (0..<count).map { _ in
+                HKQuantitySample(type: HKQuantityType(.oxygenSaturation), quantity: HKQuantity(unit: .percent(), doubleValue: 0.97), start: at, end: at)
+            }
+            return .init(samples: samples, deletedCount: 0, anchor: HKQueryAnchor(fromValue: reads))
+        })
+        try await manager.forEachBackfillBatch(types: [.oxygenSaturation], start: at, end: at.addingTimeInterval(1), mode: .rawSamples) { batch in
+            XCTAssertLessThanOrEqual(batch.quantitySamples.count, 100)
+            // An actual suspension proves the next query waits for persistence/upload.
+            await Task.yield()
+            consumed += 1
+            for sample in batch.quantitySamples { XCTAssertTrue(retainedIDs.insert(sample.uuid).inserted) }
+        }
+        XCTAssertEqual(reads, 3)
+        XCTAssertEqual(consumed, 2)
+        XCTAssertEqual(retainedIDs.count, 103)
+    }
+
+    func testConsumerFailureStopsReadingAndIsNotSwallowed() async throws {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = HKQuantitySample(type: HKQuantityType(.oxygenSaturation), quantity: HKQuantity(unit: .percent(), doubleValue: 0.97), start: at, end: at)
+        var reads = 0
+        let manager = HealthKitManager(backfillPageReader: { _, _, _, _ in
+            reads += 1
+            return .init(samples: Array(repeating: sample, count: 100), deletedCount: 0, anchor: HKQueryAnchor(fromValue: reads))
+        })
+        do {
+            try await manager.forEachBackfillBatch(types: [.oxygenSaturation], start: at, end: at.addingTimeInterval(1), mode: .rawSamples) { _ in
+                throw HealthKitManagerError.authorizationNotDetermined
+            }
+            XCTFail("Consumer errors must propagate, even if a HealthKit read would skip that error")
+        } catch { XCTAssertTrue(error is HealthKitManagerError) }
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testMissingPagingAnchorFailsInsteadOfLoopingOrAcknowledging() async throws {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let manager = HealthKitManager(backfillPageReader: { _, _, _, _ in
+            .init(samples: [], deletedCount: 100, anchor: nil)
+        })
+        do {
+            try await manager.forEachBackfillBatch(types: [.oxygenSaturation], start: at, end: at.addingTimeInterval(1), mode: .rawSamples) { _ in XCTFail("No live samples") }
+            XCTFail("Missing continuation anchor must fail")
+        } catch { XCTAssertTrue(error is HealthKitManagerError) }
+    }
+
+    func testCancellationStopsBeforeAnotherPageRead() async throws {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = HKQuantitySample(type: HKQuantityType(.oxygenSaturation), quantity: HKQuantity(unit: .percent(), doubleValue: 0.97), start: at, end: at)
+        var reads = 0
+        let manager = HealthKitManager(backfillPageReader: { _, _, _, _ in
+            reads += 1
+            return .init(samples: Array(repeating: sample, count: 100), deletedCount: 0, anchor: HKQueryAnchor(fromValue: reads))
+        })
+        let task = Task {
+            try await manager.forEachBackfillBatch(types: [.oxygenSaturation], start: at, end: at.addingTimeInterval(1), mode: .rawSamples) { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do { try await task.value; XCTFail("Cancellation must stop backfill") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testEmptyWindowsDoNotEmitConsumerBatches() async throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var consumes = 0
+        let manager = HealthKitManager(backfillPageReader: { _, _, _, _ in
+            .init(samples: [], deletedCount: 0, anchor: HKQueryAnchor(fromValue: 1))
+        })
+        for window in BackfillSync.chunks(start: start, end: start.addingTimeInterval(365 * 86400)) {
+            try await manager.forEachBackfillBatch(types: [.oxygenSaturation, .hrvSDNN], start: window.start, end: window.end, mode: .rawSamples) { _ in
+                consumes += 1
+            }
+        }
+        XCTAssertEqual(consumes, 0)
+    }
+
+    func testCrossWindowWorkoutAndCategoryKeepTheirFullTimes() async throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let boundary = start.addingTimeInterval(60)
+        let end = boundary.addingTimeInterval(60)
+        let workout = HKWorkout(activityType: .walking, start: start.addingTimeInterval(30), end: boundary.addingTimeInterval(30))
+        let category = HKCategorySample(type: HKCategoryType(.mindfulSession), value: HKCategoryValue.notApplicable.rawValue,
+                                        start: start.addingTimeInterval(30), end: boundary.addingTimeInterval(30))
+        var reads = 0
+        let manager = HealthKitManager(sampleReader: { type, predicate in
+            reads += 1
+            XCTAssertEqual(predicate, HKQuery.predicateForSamples(withStart: start, end: boundary, options: [.strictStartDate]))
+            if type == HKObjectType.workoutType() { return [workout] }
+            XCTAssertEqual(type, category.sampleType)
+            return [category]
+        })
+        var workouts: [HealthWorkoutSampleDTO] = []
+        var categories: [HealthCategorySampleDTO] = []
+        try await manager.forEachBackfillBatch(types: [.workouts, .mindfulSession], start: start, end: boundary, mode: .rawSamples) {
+            workouts += $0.workoutSamples; categories += $0.categorySamples
+        }
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(workouts.first?.uuid, workout.uuid)
+        XCTAssertEqual(workouts.first?.endAt, workout.endDate)
+        XCTAssertEqual(categories.first?.uuid, category.uuid)
+        XCTAssertEqual(categories.first?.endAt, category.endDate)
+        // The real HealthKit predicate, not only the injected reader, assigns each
+        // crossing record to exactly one contiguous window.
+        let first = HKQuery.predicateForSamples(withStart: start, end: boundary, options: [.strictStartDate])
+        let second = HKQuery.predicateForSamples(withStart: boundary, end: end, options: [.strictStartDate])
+        for sample in [workout as HKSample, category as HKSample] {
+            XCTAssertTrue(first.evaluate(with: sample))
+            XCTAssertFalse(second.evaluate(with: sample))
         }
     }
 }

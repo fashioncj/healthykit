@@ -9,12 +9,8 @@ enum BackfillDataMode: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .dailySummary: "Daily summaries"
-        case .rawSamples: "Original samples"
+        case .rawSamples: "Original blood oxygen & HRV"
         }
-    }
-
-    var chunkLength: TimeInterval {
-        (self == .rawSamples ? 1 : 30) * 24 * 60 * 60
     }
 }
 

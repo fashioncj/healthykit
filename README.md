@@ -72,6 +72,26 @@ pip install -r backend/requirements.txt
 python3 -m pytest Tests/backend/test_backend_api.py -q
 ```
 
+### Historical sync detail
+
+Historical Sync offers **Daily summaries** (the existing default) or **Original blood
+oxygen & HRV**. The latter exports individual blood oxygen and HRV records, retaining
+sample UUIDs, timestamps, source attribution, units, and metadata. All other quantity
+metrics retain daily sums/averages, including steps, energy, distance, and heart rate.
+This preserves HealthKit statistics' overlap handling for cumulative metrics.
+
+Both modes retain 30-day date windows. Blood oxygen and HRV in original mode are read
+in bounded 100-record HealthKit pages; each page is queued and uploaded before the next
+read. The existing durable queue, upload chunking, retries, and deduplication are reused.
+Workouts and category samples crossing a window boundary are selected by start time in
+original mode and retain their full end time. Sleep keeps its existing overlap query.
+Empty windows do not each add a log row; a completely empty backfill logs once.
+
+Large ranges can take longer; keep the app open while backfilling. Existing summary
+records are not deleted. The backend summary view prefers existing aggregates; consumers
+requiring original records should distinguish `metadata.aggregation` rather than add
+summaries to samples. Blood oxygen records are discrete, not continuous monitoring.
+
 ## Backend Contract
 
 The app posts to:
@@ -261,20 +281,3 @@ Production deployments should use durable storage. The Vercel deployment stores 
 Copyright 2026 megabyte0x.
 
 HealthSync is licensed under the Apache License, Version 2.0 (`Apache-2.0`). See [LICENSE](LICENSE) for the full terms.
-
-
-### Historical sync detail
-
-Historical Sync offers **Daily summaries** (the existing default) or **Original samples**.
-Daily summaries use daily sums/averages for quantity metrics. Original samples read
-individual HealthKit records, including blood oxygen and HRV, retaining sample UUIDs,
-start/end timestamps, source attribution, units, and metadata. Sleep stages, category
-samples, and workouts retain their existing behavior in both modes.
-
-Original-sample backfills read one-day windows instead of 30-day summary windows and
-reuse the durable queue, 100-record upload chunks, and retry/deduplication behavior.
-Large ranges can take longer; keep the app open while backfilling. Samples crossing a
-window boundary retain their original end time and are selected by their start time.
-Existing summary records are not deleted; consumers should distinguish records marked
-with `metadata.aggregation` from original samples to avoid double counting.
-Apple Watch blood oxygen records are discrete measurements, not continuous monitoring.

@@ -46,7 +46,7 @@ struct BackfillView: View {
                     .disabled(appState.isBusy)
 
                     Text(dataMode == .rawSamples
-                         ? "Uploads each recorded sample with its original timestamp and source, including blood oxygen and HRV. Larger exports may take longer. Blood oxygen readings remain discrete measurements, not continuous monitoring."
+                         ? "Uploads individual blood oxygen and HRV samples with original timestamps and sources. Other quantity metrics keep daily summaries to avoid overlapping-device totals. Blood oxygen readings are discrete, not continuous monitoring."
                          : "Uploads daily sums or averages for quantity metrics. Sleep stages, category samples, and workouts keep their existing detail.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
